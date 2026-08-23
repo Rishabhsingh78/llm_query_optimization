@@ -1,8 +1,7 @@
 
-from sqlalchemy import func
+from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 from app.models.models import Order, Invoice, Payment
-
 
 def get_order_count(
     db: Session,
@@ -117,26 +116,23 @@ def get_customer_summary(
     tenant_id: int,
     customer_name: str,
 ):
-    # ---------------------------------------------------------
-    # Orders: one query for all order-related metrics
-    # ---------------------------------------------------------
     order_stats = (
         db.query(
             func.count(Order.id).label("orders"),
             func.sum(
-                func.case(
+                case(
                     (Order.status == "cancelled", 1),
                     else_=0,
                 )
             ).label("cancelled_orders"),
             func.sum(
-                func.case(
+                case(
                     (Order.status == "pending", 1),
                     else_=0,
                 )
             ).label("pending_orders"),
             func.sum(
-                func.case(
+                case(
                     (Order.status == "processing", 1),
                     else_=0,
                 )
@@ -149,14 +145,6 @@ def get_customer_summary(
         .one()
     )
 
-    # ---------------------------------------------------------
-    # Invoice total: separate query
-    #
-    # IMPORTANT:
-    # Do not JOIN invoices with payments here.
-    # Joining both transaction tables can multiply rows
-    # and produce incorrect financial totals.
-    # ---------------------------------------------------------
     invoice_total = (
         db.query(
             func.coalesce(func.sum(Invoice.amount), 0)
@@ -168,9 +156,6 @@ def get_customer_summary(
         .scalar()
     )
 
-    # ---------------------------------------------------------
-    # Payment total: separate query
-    # ---------------------------------------------------------
     payment_total = (
         db.query(
             func.coalesce(func.sum(Payment.amount), 0)
@@ -182,22 +167,15 @@ def get_customer_summary(
         .scalar()
     )
 
-    # ---------------------------------------------------------
     # Financial truth is calculated by application code.
-    # LLM never calculates authoritative financial values.
-    # ---------------------------------------------------------
     outstanding = invoice_total - payment_total
 
     return {
         "customer": customer_name,
-
-        # Operational facts
         "orders": order_stats.orders or 0,
         "cancelled_orders": order_stats.cancelled_orders or 0,
         "pending_orders": order_stats.pending_orders or 0,
         "processing_orders": order_stats.processing_orders or 0,
-
-        # Authoritative financial facts
         "invoice_total": invoice_total,
         "payment_total": payment_total,
         "outstanding": outstanding,

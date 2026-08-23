@@ -1,16 +1,10 @@
 # pyrefly: ignore [missing-import]
 
-from app.services.inancial_validator import validate_financial_values
-from app.services.cache_service import set_customer_summary_cache
 import time
 
 from fastapi import Depends, FastAPI
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from app.services.cache_service import (
-    get_customer_summary_cache,
-    set_customer_summary_cache,
-)
 
 from app.db import (
     Base,
@@ -23,9 +17,15 @@ from app.llm.client import ask_with_data
 
 from app.services.analytics_service import (
     format_comparison,
+    format_customer_summary,
     format_payment_recovery,
-    format_customer_summary
 )
+
+from app.services.cache_service import (
+    get_customer_summary_cache,
+    set_customer_summary_cache,
+)
+
 from app.services.data_service import (
     extract_customer_name,
     extract_customer_names,
@@ -33,23 +33,32 @@ from app.services.data_service import (
     get_outstanding_amount,
 )
 
+from app.services.financial_validator import (
+    validate_financial_values,
+)
+
 from app.services.intent_router import (
-    detect_intent,
-    detect_complexity,
+    route_question,
 )
 
 from app.services.query_handlers import (
-    get_order_count,
-    get_total_invoice_amount,
-    get_total_payment_amount,
     get_cancelled_order_count,
+    get_customer_summary,
+    get_order_count,
     get_pending_order_count,
     get_processing_order_count,
-    get_customer_summary,
+    get_total_invoice_amount,
+    get_total_payment_amount,
 )
 
 
-app = FastAPI(title="LLM Query Optimization")
+# ============================================================
+# FastAPI application
+# ============================================================
+
+app = FastAPI(
+    title="LLM Query Optimization"
+)
 
 
 # ============================================================
@@ -58,11 +67,13 @@ app = FastAPI(title="LLM Query Optimization")
 
 @app.on_event("startup")
 def create_tables():
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(
+        bind=engine
+    )
 
 
 # ============================================================
-# Health
+# Health check
 # ============================================================
 
 @app.get("/health")
@@ -128,25 +139,48 @@ def ask_question(
 ):
     start = time.perf_counter()
 
-    print()
-    print("START TIME : >>>>>>>>>>>>>>>>>>>>.")
-
     question = request.question.strip()
 
+    if not question:
+        return {
+            "answer": "Please provide a question.",
+            "source": "validation",
+            "intent": "UNKNOWN",
+            "timing": {
+                "db": 0,
+                "format": 0,
+                "llm": 0,
+                "total": 0,
+            },
+        }
+
+    print()
+    print("=" * 70)
+    print("QUESTION:", question)
+
     # ========================================================
-    # 1. Identify customer + intent
+    # 1. Identify customer + route question
     # ========================================================
 
     customer_name = extract_customer_name(
         question
     )
 
-    intent = detect_intent(
+    route = route_question(
         question
     )
 
+    intent = route.intent
+    complexity = route.complexity
+
+    print(
+        f"ROUTE: intent={intent}, "
+        f"complexity={complexity}, "
+        f"confidence={route.confidence}, "
+        f"reason={route.reason}"
+    )
+
     print("Customer:", customer_name)
-    print("Intent:", intent)
 
     # ========================================================
     # 2. Deterministic queries
@@ -154,13 +188,17 @@ def ask_question(
     #
     # These queries do NOT need an LLM.
     #
-    # SQL is responsible for exact calculations.
+    # SQL/application code is responsible for:
     #
-    # This gives us:
+    # - financial calculations
+    # - counts
+    # - exact database values
     #
-    # - better accuracy
+    # This gives:
+    #
     # - lower latency
     # - lower LLM cost
+    # - stronger correctness
     #
     # ========================================================
 
@@ -172,23 +210,20 @@ def ask_question(
         intent == "OUTSTANDING_AMOUNT"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         outstanding = get_outstanding_amount(
             db,
             tenant_id,
             customer_name,
         )
 
+        db_time = (
+            time.perf_counter() - db_start
+        )
+
         total_time = (
             time.perf_counter() - start
-        )
-
-        print(
-            "Outstanding:",
-            outstanding,
-        )
-
-        print(
-            f"Total time: {total_time:.4f}s"
         )
 
         return {
@@ -201,7 +236,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -216,10 +251,16 @@ def ask_question(
         intent == "ORDER_COUNT"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_order_count(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -233,7 +274,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -248,10 +289,16 @@ def ask_question(
         intent == "INVOICE_TOTAL"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_total_invoice_amount(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -266,7 +313,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -281,10 +328,16 @@ def ask_question(
         intent == "PAYMENT_TOTAL"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_total_payment_amount(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -299,7 +352,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -314,10 +367,16 @@ def ask_question(
         intent == "CANCELLED_ORDER_COUNT"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_cancelled_order_count(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -332,7 +391,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -347,10 +406,16 @@ def ask_question(
         intent == "PENDING_ORDER_COUNT"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_pending_order_count(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -365,7 +430,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -380,10 +445,16 @@ def ask_question(
         intent == "PROCESSING_ORDER_COUNT"
         and customer_name
     ):
+        db_start = time.perf_counter()
+
         result = get_processing_order_count(
             db,
             tenant_id,
             customer_name,
+        )
+
+        db_time = (
+            time.perf_counter() - db_start
         )
 
         total_time = (
@@ -398,7 +469,7 @@ def ask_question(
             "source": "database",
             "intent": intent,
             "timing": {
-                "db": round(total_time, 4),
+                "db": round(db_time, 4),
                 "format": 0,
                 "llm": 0,
                 "total": round(total_time, 4),
@@ -413,20 +484,23 @@ def ask_question(
         question
     )
 
-    print(
-        "Customers:",
-        customer_names,
-    )
+    print("Customers:", customer_names)
 
-    # --------------------------------------------------------
-    # 3A. We know which customers are relevant
-    # --------------------------------------------------------
+    # ========================================================
+    # 3A. Relevant customers identified
+    # ========================================================
 
     if customer_names:
 
         summaries = []
 
+        summary_start = time.perf_counter()
+
         for customer in customer_names:
+
+            # ------------------------------------------------
+            # Try Redis cache first
+            # ------------------------------------------------
 
             summary = get_customer_summary_cache(
                 tenant_id,
@@ -436,14 +510,18 @@ def ask_question(
             if summary is not None:
 
                 print(
-                    f"Cache HIT: {customer}"
+                    f"CACHE HIT: {customer}"
                 )
 
             else:
 
                 print(
-                    f"Cache MISS: {customer}"
+                    f"CACHE MISS: {customer}"
                 )
+
+                # --------------------------------------------
+                # Fetch only required aggregate data
+                # --------------------------------------------
 
                 summary = get_customer_summary(
                     db,
@@ -451,36 +529,53 @@ def ask_question(
                     customer,
                 )
 
+                # --------------------------------------------
+                # Cache customer summary
+                # --------------------------------------------
+
                 set_customer_summary_cache(
                     tenant_id,
                     customer,
                     summary,
                 )
 
-            summaries.append(summary)
+            summaries.append(
+                summary
+            )
 
-        # Convert structured summaries
-        # into compact LLM context.
+        summary_db_time = (
+            time.perf_counter()
+            - summary_start
+        )
+
+        # ----------------------------------------------------
+        # Compact structured context
+        # ----------------------------------------------------
+        #
+        # IMPORTANT:
+        #
+        # We DO NOT send:
+        #
+        # - every order
+        # - every invoice
+        # - every payment
+        # - every message
+        #
+        # We only send the aggregate information required
+        # for the question.
+        #
+        # ----------------------------------------------------
+
         formatted_data = "\n".join(
             str(summary)
             for summary in summaries
         )
 
-    # --------------------------------------------------------
-    # 3B. We don't know the customer
-    # --------------------------------------------------------
+    # ========================================================
+    # 3B. Customer cannot be identified
+    # ========================================================
 
     else:
-
-        # IMPORTANT:
-        #
-        # Do NOT send the complete tenant database
-        # to the LLM.
-        #
-        # This was the original performance problem.
-        #
-        # Instead, safely refuse / ask for clarification.
-        #
 
         total_time = (
             time.perf_counter() - start
@@ -497,6 +592,7 @@ def ask_question(
             ),
             "source": "abstained",
             "intent": intent,
+            "complexity": complexity,
             "timing": {
                 "db": 0,
                 "format": 0,
@@ -506,7 +602,7 @@ def ask_question(
         }
 
     # ========================================================
-    # 4. DB / context timing
+    # 4. Context timing
     # ========================================================
 
     db_time = (
@@ -514,22 +610,26 @@ def ask_question(
     )
 
     print(
-        "DB TIME:",
-        db_time,
+        f"DB/context time: {db_time:.4f}s"
     )
 
     print(
-        "Formatted characters:",
-        len(formatted_data),
+        f"Formatted characters: "
+        f"{len(formatted_data)}"
     )
 
     # ========================================================
-    # 5. Complexity routing
+    # 5. Complexity
     # ========================================================
-
-    complexity = detect_complexity(
-        question
-    )
+    #
+    # IMPORTANT:
+    #
+    # Complexity has ALREADY been determined by
+    # route_question().
+    #
+    # Do NOT call detect_complexity() again here.
+    #
+    # ========================================================
 
     print(
         "Complexity:",
@@ -537,21 +637,28 @@ def ask_question(
     )
 
     # ========================================================
-    # 6. LLM
-    # ========================================================
-
-    llm_start = time.perf_counter()
     # 6. Deterministic analytics
+    # ========================================================
 
     question_lower = question.lower()
 
-    if len(summaries) == 2 and "payment recovery" in question_lower:
+    # --------------------------------------------------------
+    # Payment recovery
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 2
+        and "payment recovery" in question_lower
+    ):
+
         answer = format_payment_recovery(
             summaries[0],
             summaries[1],
         )
 
-        total_time = time.perf_counter() - start
+        total_time = (
+            time.perf_counter() - start
+        )
 
         return {
             "answer": answer,
@@ -567,39 +674,26 @@ def ask_question(
             },
         }
 
-    if len(summaries) == 2 and (
-        "compare" in question_lower
-        or "difference" in question_lower
+    # --------------------------------------------------------
+    # Compare customers
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 2
+        and (
+            "compare" in question_lower
+            or "difference" in question_lower
+        )
     ):
+
         answer = format_comparison(
             summaries[0],
             summaries[1],
         )
 
-        total_time = time.perf_counter() - start
-
-        return {
-            "answer": answer,
-            "source": "database",
-            "intent": intent,
-            "complexity": complexity,
-            "customers": customer_names,
-            "timing": {
-                "db": round(db_time, 4),
-                "format": 0,
-                "llm": 0,
-                "total": round(total_time, 4),
-            },
-        }
-    
-
-    if len(summaries) == 1 and (
-    "summarize" in question.lower()
-    or "summary" in question.lower()
-):
-        answer = format_customer_summary(summaries[0])
-
-        total_time = time.perf_counter() - start
+        total_time = (
+            time.perf_counter() - start
+        )
 
         return {
             "answer": answer,
@@ -615,11 +709,44 @@ def ask_question(
             },
         }
 
-        # ========================================================
-    # 6. Deterministic reasoning
+    # --------------------------------------------------------
+    # Customer summary
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 1
+        and (
+            "summarize" in question_lower
+            or "summary" in question_lower
+            or "overview" in question_lower
+        )
+    ):
+
+        answer = format_customer_summary(
+            summaries[0]
+        )
+
+        total_time = (
+            time.perf_counter() - start
+        )
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
     # ========================================================
-
-    question_lower = question.lower()
+    # 7. Deterministic reasoning
+    # ========================================================
 
     # --------------------------------------------------------
     # Why is outstanding higher?
@@ -630,19 +757,23 @@ def ask_question(
         and "higher" in question_lower
         and len(summaries) == 1
     ):
+
         summary = summaries[0]
 
         answer = (
-            f"{summary['customer']} has an outstanding balance of "
-            f"₹{summary['outstanding']:,}. "
+            f"{summary['customer']} has an outstanding "
+            f"balance of ₹{summary['outstanding']:,}. "
             f"This is because the invoice total is "
-            f"₹{summary['invoice_total']:,}, while the payment total is "
+            f"₹{summary['invoice_total']:,}, while the "
+            f"payment total is "
             f"₹{summary['payment_total']:,}. "
-            f"The outstanding amount is the difference between "
-            f"invoice total and payment total."
+            f"The outstanding amount is the difference "
+            f"between invoice total and payment total."
         )
 
-        total_time = time.perf_counter() - start
+        total_time = (
+            time.perf_counter() - start
+        )
 
         return {
             "answer": answer,
@@ -666,11 +797,13 @@ def ask_question(
         "business risks" in question_lower
         and len(summaries) == 1
     ):
+
         summary = summaries[0]
 
         answer = (
-            f"Based on the provided data, {summary['customer']} "
-            f"has the following business risks:\n"
+            f"Based on the provided data, "
+            f"{summary['customer']} has the following "
+            f"business risks:\n"
             f"- {summary['cancelled_orders']} cancelled orders\n"
             f"- {summary['pending_orders']} pending orders\n"
             f"- {summary['processing_orders']} processing orders\n"
@@ -678,7 +811,9 @@ def ask_question(
             f"₹{summary['outstanding']:,}"
         )
 
-        total_time = time.perf_counter() - start
+        total_time = (
+            time.perf_counter() - start
+        )
 
         return {
             "answer": answer,
@@ -693,10 +828,9 @@ def ask_question(
                 "total": round(total_time, 4),
             },
         }
-    # 7. LLM
 
-        # --------------------------------------------------------
-    # What should we do about the customer?
+    # --------------------------------------------------------
+    # What should we do?
     # --------------------------------------------------------
 
     if (
@@ -707,35 +841,41 @@ def ask_question(
             or "what do we do about" in question_lower
         )
     ):
+
         summary = summaries[0]
 
         recommendations = []
 
         if summary["outstanding"] > 0:
             recommendations.append(
-                f"Prioritize collection of the outstanding "
+                f"Prioritize collection of the "
+                f"outstanding "
                 f"₹{summary['outstanding']:,}."
             )
 
         if summary["pending_orders"] > 0:
             recommendations.append(
-                f"Review the {summary['pending_orders']} pending orders "
+                f"Review the "
+                f"{summary['pending_orders']} pending orders "
                 f"and follow up on delayed orders."
             )
 
         if summary["processing_orders"] > 0:
             recommendations.append(
-                f"Monitor the {summary['processing_orders']} processing "
-                f"orders to ensure they are completed."
+                f"Monitor the "
+                f"{summary['processing_orders']} processing orders "
+                f"to ensure they are completed."
             )
 
         if summary["cancelled_orders"] > 0:
             recommendations.append(
-                f"Review the {summary['cancelled_orders']} cancelled orders "
+                f"Review the "
+                f"{summary['cancelled_orders']} cancelled orders "
                 f"to identify recurring cancellation issues."
             )
 
         if recommendations:
+
             answer = (
                 f"Based on the available data for "
                 f"{summary['customer']}:\n"
@@ -744,13 +884,18 @@ def ask_question(
                     for recommendation in recommendations
                 )
             )
+
         else:
+
             answer = (
-                f"No immediate action is indicated by the "
-                f"available data for {summary['customer']}."
+                f"No immediate action is indicated "
+                f"by the available data for "
+                f"{summary['customer']}."
             )
 
-        total_time = time.perf_counter() - start
+        total_time = (
+            time.perf_counter() - start
+        )
 
         return {
             "answer": answer,
@@ -765,7 +910,19 @@ def ask_question(
                 "total": round(total_time, 4),
             },
         }
-        
+
+    # ========================================================
+    # 8. LLM fallback
+    # ========================================================
+    #
+    # Only questions which cannot be answered safely through
+    # deterministic application logic reach the LLM.
+    #
+    # The LLM receives compact customer summaries rather than
+    # the complete tenant database.
+    #
+    # ========================================================
+
     llm_start = time.perf_counter()
 
     answer = ask_with_data(
@@ -778,35 +935,52 @@ def ask_question(
         time.perf_counter() - llm_start
     )
 
+    # ========================================================
+    # 9. Financial validation
+    # ========================================================
+    #
+    # Never trust an LLM-generated financial number directly.
+    #
+    # Validate all financial values against authoritative
+    # application/database summaries.
+    #
+    # ========================================================
+
     is_valid = validate_financial_values(
         answer,
         summaries,
     )
-    print("Financial validation:", is_valid)
+
+    print(
+        "Financial validation:",
+        is_valid,
+    )
 
     if not is_valid:
+
         total_time = (
             time.perf_counter() - start
         )
 
         return {
             "answer": (
-                "I couldn't safely verify the financial figures "
-                "in the generated response."
+                "I couldn't safely verify the financial "
+                "figures in the generated response."
             ),
             "source": "validation_failed",
             "intent": intent,
+            "complexity": complexity,
             "customers": customer_names,
             "timing": {
-                "db": round(db_time, 2),
+                "db": round(db_time, 4),
                 "format": 0,
-                "llm": round(llm_time, 2),
-                "total": round(total_time, 2),
+                "llm": round(llm_time, 4),
+                "total": round(total_time, 4),
             },
         }
 
     # ========================================================
-    # 7. Total timing
+    # 10. Final timing
     # ========================================================
 
     total_time = (
@@ -814,19 +988,19 @@ def ask_question(
     )
 
     print(
-        f"DB time: {db_time:.2f}s"
+        f"DB/context time: {db_time:.4f}s"
     )
 
     print(
-        f"LLM time: {llm_time:.2f}s"
+        f"LLM time: {llm_time:.4f}s"
     )
 
     print(
-        f"Total time: {total_time:.2f}s"
+        f"Total time: {total_time:.4f}s"
     )
 
     # ========================================================
-    # 8. Response
+    # 11. Response
     # ========================================================
 
     return {
@@ -836,9 +1010,9 @@ def ask_question(
         "complexity": complexity,
         "customers": customer_names,
         "timing": {
-            "db": round(db_time, 2),
+            "db": round(db_time, 4),
             "format": 0,
-            "llm": round(llm_time, 2),
-            "total": round(total_time, 2),
+            "llm": round(llm_time, 4),
+            "total": round(total_time, 4),
         },
     }
