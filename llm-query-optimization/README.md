@@ -492,3 +492,36 @@ This is particularly important for financial and business-risk questions.
 | LLM for complex queries    | Handles semantic reasoning       | Higher latency and potential cost            |
 | Redis caching              | Faster repeated queries          | Requires cache invalidation                  |
 | Tenant limits              | Prevents noisy-neighbor problems | Requests can be rejected at quota            |
+
+
+
+
+                    User Question
+                         │
+                         ▼
+                  Intent Router
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+    Deterministic    Analytics       Unsupported
+          │              │              │
+          ▼              ▼              ▼
+       Database      DB + Formatter   Abstain
+          │              │
+          └───────┬──────┘
+                  │
+                  ▼
+          Genuine Complex Query
+                  │
+                  ▼
+                 LLM
+                  │
+                  ▼
+        Financial Validation
+                  │
+          ┌───────┴────────┐
+          ▼                ▼
+       Valid             Invalid
+          │                │
+          ▼                ▼
+       Answer           Safe Abstain
