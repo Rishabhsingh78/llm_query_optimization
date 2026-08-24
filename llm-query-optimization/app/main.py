@@ -2,10 +2,13 @@
 
 import time
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
+from app.services.tenant_limiter import (
+    tenant_limiter,
+    TenantLimitExceeded,
+)
 from app.db import (
     Base,
     SessionLocal,
@@ -157,6 +160,17 @@ def ask_question(
     print()
     print("=" * 70)
     print("QUESTION:", question)
+    try:
+        tenant_limiter.check_request(tenant_id)
+
+    except TenantLimitExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "tenant_request_limit_exceeded",
+                "message": str(exc),
+            },
+        )
 
     # ========================================================
     # 1. Identify customer + route question
@@ -921,6 +935,43 @@ def ask_question(
     # The LLM receives compact customer summaries rather than
     # the complete tenant database.
     #
+    # ========================================================
+    # ========================================================
+    # LLM quota
+    # ========================================================
+
+    # Rough input-token estimate.
+    # We intentionally check BEFORE making the expensive call.
+    estimated_tokens = max(1,(len(question) + len(formatted_data)) // 4,)
+
+    try:
+        tenant_limiter.check_llm_request(
+            tenant_id=tenant_id,
+            estimated_tokens=estimated_tokens,
+        )
+
+    except TenantLimitExceeded as exc:
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": (
+                "This tenant has reached its LLM usage limit. "
+                "Please try again later."
+            ),
+            "source": "rate_limited",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
+    # ========================================================
+    # LLM call
     # ========================================================
 
     llm_start = time.perf_counter()
