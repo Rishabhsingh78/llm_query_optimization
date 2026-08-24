@@ -1,3 +1,4 @@
+from app.services import query_handlers
 from dataclasses import dataclass
 
 
@@ -38,6 +39,18 @@ FINANCIAL_INTENTS = {
     "INVOICE_TOTAL",
     "PAYMENT_TOTAL",
 }
+
+UNSUPPORTED_KEYWORDS = (
+    "profit margin",
+    "profit",
+    "delivery time",
+    "delivery duration",
+    "most recently",
+    "latest order",
+    "recent order",
+    "placed most recently",
+)
+
 
 
 def detect_intent(question: str) -> str:
@@ -92,11 +105,33 @@ def route_question(question: str) -> RouteDecision:
     when confidence is low, we classify the query as HARD
     instead of sending it through an unsafe deterministic path.
     """
-
     q = question.lower().strip()
+
+    if detect_unsupported_query(q):
+        return RouteDecision(
+            intent="UNSUPPORTED",
+            complexity="DETERMINISTIC",
+            confidence=0.99,
+            reason=(
+                "Requested information is not "
+                "represented in the available schema."
+            ),
+        )
 
     intent = detect_intent(q)
     complexity = detect_complexity(q)
+
+    # ---------------------------------------------------------
+    # UNSUPPORTED / ABSTAIN PATH (NO DB QUERIES)
+    # ---------------------------------------------------------
+
+    if detect_unsupported_query(question):
+        return RouteDecision(
+            intent="COMPLEX",
+            complexity="HARD",
+            confidence=0.99,
+            reason="Unsupported query – no database access.",
+        )
 
     # ---------------------------------------------------------
     # High-confidence deterministic financial queries
@@ -167,3 +202,12 @@ def route_question(question: str) -> RouteDecision:
 
 def is_financial_intent(intent: str) -> bool:
     return intent in FINANCIAL_INTENTS
+
+
+def detect_unsupported_query(question: str) -> bool:
+    q = question.lower().strip()
+
+    return any(
+        keyword in q
+        for keyword in UNSUPPORTED_KEYWORDS
+    )
