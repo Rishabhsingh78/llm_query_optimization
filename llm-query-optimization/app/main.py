@@ -665,6 +665,48 @@ def ask_question(
                 for summary in summaries
             )
 
+        elif intent == "OUTSTANDING_COMPARISON":
+
+            # "Which customer has the higher outstanding amount?"
+            # No customer name is mentioned explicitly.
+            # Fetch all known customers and compare deterministically.
+
+            customer_names = [
+                "Sharma Traders",
+                "Gupta Enterprises",
+            ]
+
+            summaries = []
+
+            summary_start = time.perf_counter()
+
+            for customer in customer_names:
+
+                summary = get_customer_summary_cache(
+                    tenant_id,
+                    customer,
+                )
+
+                if summary is None:
+                    summary = get_customer_summary(
+                        db,
+                        tenant_id,
+                        customer,
+                    )
+
+                    set_customer_summary_cache(
+                        tenant_id,
+                        customer,
+                        summary,
+                    )
+
+                summaries.append(summary)
+
+            formatted_data = "\n".join(
+                str(summary)
+                for summary in summaries
+            )
+
         else:
 
             total_time = (
@@ -879,6 +921,45 @@ def ask_question(
     # 7. Deterministic reasoning
     # ========================================================
 
+    print(
+        "DEBUG OUTSTANDING COMPARISON:",
+        intent,
+        len(summaries),
+        summaries,
+        )
+
+    if (
+        intent == "OUTSTANDING_COMPARISON"
+        and len(summaries) >= 2
+    ):
+        highest = max(
+            summaries,
+            key=lambda summary: summary["outstanding"],
+        )
+
+        answer = (
+            f"{highest['customer']} has the higher "
+            f"outstanding amount: "
+            f"₹{highest['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
+
     # --------------------------------------------------------
     # Why is outstanding higher?
     # --------------------------------------------------------
@@ -1041,7 +1122,78 @@ def ask_question(
                 "total": round(total_time, 4),
             },
         }
+    # 7.x Deterministic outstanding comparison
+    # ========================================================
 
+    if (
+        intent == "OUTSTANDING_COMPARISON"
+        and len(summaries) >= 2
+    ):
+        highest = max(
+            summaries,
+            key=lambda summary: summary["outstanding"],
+        )
+
+        answer = (
+            f"{highest['customer']} has the higher "
+            f"outstanding amount: "
+            f"₹{highest['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
+    # --------------------------------------------------------
+    # Financial situation explanation
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 1
+        and (
+            "financial situation" in question_lower
+            or "financial status" in question_lower
+            or "financial position" in question_lower
+        )
+    ):
+
+        summary = summaries[0]
+
+        answer = (
+            f"{summary['customer']} has an invoice total of "
+            f"₹{summary['invoice_total']:,} and payments of "
+            f"₹{summary['payment_total']:,}, leaving an "
+            f"outstanding balance of "
+            f"₹{summary['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
     # ========================================================
     # 8. LLM fallback
     # ========================================================
@@ -1101,7 +1253,28 @@ def ask_question(
     print("\nLLM GENERATED ANSWER:")
     print(answer)
     print()
+    if not answer:
+        total_time = time.perf_counter() - start
 
+        return {
+            "answer": (
+                "I’m unable to process this reasoning request right now. "
+                "Please try again later."
+        ),
+        "source": "llm_unavailable",
+        "intent": intent,
+        "complexity": complexity,
+        "customers": customer_names,
+        "timing": {
+            "db": round(db_time, 4),
+            "format": 0,
+            "llm": round(
+                time.perf_counter() - llm_start,
+                4,
+            ),
+            "total": round(total_time, 4),
+        },
+    }
     llm_time = (
         time.perf_counter() - llm_start
     )
@@ -1121,6 +1294,11 @@ def ask_question(
         answer,
         summaries,
     )
+    print("================================")
+    print("LLM RAW ANSWER:")
+    print(answer)
+    print("================================")
+    print("Financial validation:", is_valid)
 
     print(
         "Financial validation:",

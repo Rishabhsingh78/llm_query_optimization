@@ -1,3 +1,6 @@
+from app.services.cache_service import (
+    invalidate_customer_summary_cache,
+)
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import Order, Invoice, Payment, Message
@@ -133,3 +136,21 @@ def extract_customer_names(question: str):
         for customer in customers
         if customer.lower() in question_lower
     ]
+
+
+def invalidate_customer_financial_cache(
+    tenant_id: int,
+    customer_name: str,
+):
+    """
+    Invalidate all cached financial/customer summary
+    data affected by a customer data mutation.
+    """
+
+    if not customer_name:
+        return
+
+    invalidate_customer_summary_cache(
+        tenant_id,
+        customer_name,
+    )

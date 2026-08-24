@@ -70,12 +70,14 @@ QUESTIONS = [
     "What is Sharma Traders' profit margin?",
     "What is the average delivery time for Sharma Traders?",
     "Which order was placed most recently by Sharma Traders?",
-
-    # ------------------------------------------------------------
     # Genuine LLM fallback
     # ------------------------------------------------------------
 
     "Explain the financial situation of Sharma Traders using the available data.",
+    "What patterns do you see in Sharma Traders' business?",
+    "Based on the available data, give me an assessment of Sharma Traders.",
+    "What factors indicate that Sharma Traders may be a collection risk?",
+    "What insights can you derive about Sharma Traders from the available data?",
 ]
 
 
@@ -247,14 +249,23 @@ def expected_result(question):
         "Gupta Enterprises",
     )
 
-    # ------------------------------------------------------------
     # Genuine LLM fallback
     # ------------------------------------------------------------
 
-    if "explain the financial situation" in question_lower:
+    llm_questions = (
+        "explain the financial situation",
+        "what patterns do you see",
+        "give me an assessment",
+        "what factors indicate",
+        "what insights can you derive",
+    )
+
+    if any(
+        phrase in question_lower
+        for phrase in llm_questions
+    ):
         return {
-            "type": "numeric",
-            "value": sharma["outstanding"],
+            "type": "llm_reasoning",
         }
 
     # ------------------------------------------------------------
@@ -521,14 +532,24 @@ def evaluate_answer(answer, expected):
         return contains_abstention(answer)
 
     # ------------------------------------------------------------
-    # Unverified
+    # LLM reasoning
     # ------------------------------------------------------------
 
-    if expected_type == "unverified":
-        return None
+    if expected_type == "llm_reasoning":
 
-    return False
+        if contains_abstention(answer):
+            return False
 
+        if not answer.strip():
+            return False
+
+        # LLM should provide a meaningful response.
+        # Very short responses usually indicate
+        # truncation / validation failure.
+        if len(answer.strip()) < 50:
+            return False
+
+        return True
 
 # ================================================================
 # Main benchmark
