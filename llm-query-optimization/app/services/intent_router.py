@@ -1,55 +1,51 @@
-# def detect_intent(question: str) -> str:
-#     q = question.lower()
+from dataclasses import dataclass
 
-#     if "outstanding" in q:
-#         return "OUTSTANDING_AMOUNT"
 
-#     if "cancelled" in q and "order" in q:
-#         return "CANCELLED_ORDER_COUNT"
+@dataclass(frozen=True)
+class RouteDecision:
+    intent: str
+    complexity: str
+    confidence: float
+    reason: str
 
-#     if "pending" in q and "order" in q:
-#         return "PENDING_ORDER_COUNT"
 
-#     if "processing" in q and "order" in q:
-#         return "PROCESSING_ORDER_COUNT"
+SEMANTIC_KEYWORDS = (
+    "why",
+    "reason",
+    "explain",
+    "risk",
+    "recommend",
+    "recommendation",
+    "predict",
+    "likely",
+    "cause",
+    "causing",
+    "should we",
+    "what should",
+)
 
-#     if "how many" in q and "order" in q:
-#         return "ORDER_COUNT"
+SIMPLE_ANALYTICS_KEYWORDS = (
+    "compare",
+    "comparison",
+    "difference",
+    "summary",
+    "summarize",
+    "overview",
+)
 
-#     if "total invoice" in q or "invoice amount" in q:
-#         return "INVOICE_TOTAL"
-
-#     if "total payment" in q or "payment amount" in q:
-#         return "PAYMENT_TOTAL"
-
-#     return "COMPLEX"
+FINANCIAL_INTENTS = {
+    "OUTSTANDING_AMOUNT",
+    "INVOICE_TOTAL",
+    "PAYMENT_TOTAL",
+}
 
 
 def detect_intent(question: str) -> str:
-    q = question.lower()
+    q = question.lower().strip()
 
-    # Semantic / reasoning questions must go to LLM.
-    semantic_keywords = [
-        "why",
-        "reason",
-        "explain",
-        "risk",
-        "recommend",
-        "recommendation",
-        "predict",
-        "likely",
-        "cause",
-        "causing",
-        "should we",
-        "what should",
-    ]
-
-    is_semantic = any(
-        keyword in q
-        for keyword in semantic_keywords
-    )
-
-    if is_semantic:
+    # Semantic questions must not be treated
+    # as deterministic financial queries.
+    if any(keyword in q for keyword in SEMANTIC_KEYWORDS):
         return "COMPLEX"
 
     if "outstanding" in q:
@@ -77,42 +73,97 @@ def detect_intent(question: str) -> str:
 
 
 def detect_complexity(question: str) -> str:
-    q = question.lower()
+    q = question.lower().strip()
 
-    hard_keywords = [
-        "why",
-        "reason",
-        "risk",
-        "explain",
-        "recommend",
-        "recommendation",
-        "predict",
-        "likely",
-        "cause",
-        "causing",
-        "should we",
-        "what should",
-    ]
-
-    if any(
-        keyword in q
-        for keyword in hard_keywords
-    ):
+    if any(keyword in q for keyword in SEMANTIC_KEYWORDS):
         return "HARD"
 
-    simple_keywords = [
-        "compare",
-        "comparison",
-        "difference",
-        "summary",
-        "summarize",
-        "overview",
-    ]
-
-    if any(
-        keyword in q
-        for keyword in simple_keywords
-    ):
+    if any(keyword in q for keyword in SIMPLE_ANALYTICS_KEYWORDS):
         return "SIMPLE"
 
     return "HARD"
+
+
+def route_question(question: str) -> RouteDecision:
+    """
+    Decide how the query should be handled.
+
+    The router is deliberately conservative:
+    when confidence is low, we classify the query as HARD
+    instead of sending it through an unsafe deterministic path.
+    """
+
+    q = question.lower().strip()
+
+    intent = detect_intent(q)
+    complexity = detect_complexity(q)
+
+    # ---------------------------------------------------------
+    # High-confidence deterministic financial queries
+    # ---------------------------------------------------------
+
+    if intent in FINANCIAL_INTENTS:
+        return RouteDecision(
+            intent=intent,
+            complexity="DETERMINISTIC",
+            confidence=0.99,
+            reason="Exact financial intent matched.",
+        )
+
+    # ---------------------------------------------------------
+    # High-confidence deterministic operational queries
+    # ---------------------------------------------------------
+
+    operational_intents = {
+        "ORDER_COUNT",
+        "CANCELLED_ORDER_COUNT",
+        "PENDING_ORDER_COUNT",
+        "PROCESSING_ORDER_COUNT",
+    }
+
+    if intent in operational_intents:
+        return RouteDecision(
+            intent=intent,
+            complexity="DETERMINISTIC",
+            confidence=0.99,
+            reason="Exact operational intent matched.",
+        )
+
+    # ---------------------------------------------------------
+    # Semantic questions
+    # ---------------------------------------------------------
+
+    if complexity == "HARD":
+        return RouteDecision(
+            intent="COMPLEX",
+            complexity="HARD",
+            confidence=0.80,
+            reason="Semantic/reasoning query detected.",
+        )
+
+    # ---------------------------------------------------------
+    # Simple analytics
+    # ---------------------------------------------------------
+
+    if complexity == "SIMPLE":
+        return RouteDecision(
+            intent="COMPLEX",
+            complexity="SIMPLE",
+            confidence=0.90,
+            reason="Simple analytical query detected.",
+        )
+
+    # ---------------------------------------------------------
+    # Conservative fallback
+    # ---------------------------------------------------------
+
+    return RouteDecision(
+        intent="COMPLEX",
+        complexity="HARD",
+        confidence=0.50,
+        reason="Unable to confidently classify query.",
+    )
+
+
+def is_financial_intent(intent: str) -> bool:
+    return intent in FINANCIAL_INTENTS

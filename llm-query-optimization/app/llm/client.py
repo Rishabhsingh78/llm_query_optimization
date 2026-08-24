@@ -16,7 +16,9 @@ STRONG_MODEL = "google/gemini-3.7-flash"
 encoding = tiktoken.get_encoding("cl100k_base")
 
 def get_model_for_complexity(complexity: str):
-    return "google/gemini-3.5-flash-lite"
+    if complexity == "SIMPLE":
+        return FAST_MODEL
+    return STRONG_MODEL
 
 def ask_llm(prompt: str, model: str) -> str:
     response = client.chat.completions.create(
