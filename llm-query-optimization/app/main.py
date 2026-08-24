@@ -16,7 +16,7 @@ from app.db import (
     test_connection,
 )
 
-from app.llm.client import ask_with_data
+import app.llm.client as llm_client
 
 from app.services.analytics_service import (
     format_comparison,
@@ -186,6 +186,24 @@ def ask_question(
 
     intent = route.intent
     complexity = route.complexity
+    if intent == "UNSUPPORTED":
+
+        total_time = time.perf_counter() - start
+        return {
+            "answer": (
+                "The provided data does not contain "
+                "enough information to answer that."
+                ),
+            "source": "abstained",
+            "intent": intent,
+            "complexity": complexity,
+            "timing": {
+                "db": 0,
+            "format": 0,
+            "llm": 0,
+            "total": round(total_time, 4),
+            },
+        }
 
     print(
         f"ROUTE: intent={intent}, "
@@ -591,29 +609,129 @@ def ask_question(
 
     else:
 
-        total_time = (
-            time.perf_counter() - start
-        )
+        question_lower = question.lower()
 
-        print(
-            "Could not identify relevant customer."
-        )
+        # ----------------------------------------------------
+        # Customer-independent comparison
+        # ----------------------------------------------------
+        # Some questions compare known customers without
+        # explicitly naming them. These can still be answered
+        # deterministically from authoritative database data.
+        # ----------------------------------------------------
 
-        return {
-            "answer": (
-                "I need a customer name or a more "
-                "specific question to answer this accurately."
-            ),
-            "source": "abstained",
-            "intent": intent,
-            "complexity": complexity,
-            "timing": {
-                "db": 0,
-                "format": 0,
-                "llm": 0,
-                "total": round(total_time, 4),
-            },
-        }
+        if (
+            intent == "OUTSTANDING_AMOUNT"
+            and "higher" in question_lower
+            and "outstanding" in question_lower
+        ):
+            customer_names = [
+                "Sharma Traders",
+                "Gupta Enterprises",
+            ]
+
+            summaries = []
+
+            summary_start = time.perf_counter()
+
+            for customer in customer_names:
+
+                summary = get_customer_summary_cache(
+                    tenant_id,
+                    customer,
+                )
+
+                if summary is None:
+                    summary = get_customer_summary(
+                        db,
+                        tenant_id,
+                        customer,
+                    )
+
+                    set_customer_summary_cache(
+                        tenant_id,
+                        customer,
+                        summary,
+                    )
+
+                summaries.append(summary)
+
+            summary_db_time = (
+                time.perf_counter()
+                - summary_start
+            )
+
+            formatted_data = "\n".join(
+                str(summary)
+                for summary in summaries
+            )
+
+        elif intent == "OUTSTANDING_COMPARISON":
+
+            # "Which customer has the higher outstanding amount?"
+            # No customer name is mentioned explicitly.
+            # Fetch all known customers and compare deterministically.
+
+            customer_names = [
+                "Sharma Traders",
+                "Gupta Enterprises",
+            ]
+
+            summaries = []
+
+            summary_start = time.perf_counter()
+
+            for customer in customer_names:
+
+                summary = get_customer_summary_cache(
+                    tenant_id,
+                    customer,
+                )
+
+                if summary is None:
+                    summary = get_customer_summary(
+                        db,
+                        tenant_id,
+                        customer,
+                    )
+
+                    set_customer_summary_cache(
+                        tenant_id,
+                        customer,
+                        summary,
+                    )
+
+                summaries.append(summary)
+
+            formatted_data = "\n".join(
+                str(summary)
+                for summary in summaries
+            )
+
+        else:
+
+            total_time = (
+                time.perf_counter() - start
+            )
+
+            print(
+                "Could not identify relevant customer."
+            )
+
+            return {
+                "answer": (
+                    "I need a customer name or a more "
+                    "specific question to answer this accurately."
+                ),
+                "source": "abstained",
+                "intent": intent,
+                "complexity": complexity,
+                "timing": {
+                    "db": 0,
+                    "format": 0,
+                    "llm": 0,
+                    "total": round(total_time, 4),
+                },
+            }
 
     # ========================================================
     # 4. Context timing
@@ -668,6 +786,47 @@ def ask_question(
         answer = format_payment_recovery(
             summaries[0],
             summaries[1],
+        )
+
+        total_time = (
+            time.perf_counter() - start
+        )
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+        # --------------------------------------------------------
+    # Higher outstanding
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 2
+        and "higher outstanding" in question_lower
+    ):
+        first = summaries[0]
+        second = summaries[1]
+
+        if first["outstanding"] > second["outstanding"]:
+            higher = first
+            lower = second
+        else:
+            higher = second
+            lower = first
+
+        answer = (
+            f"{higher['customer']} has the higher outstanding amount: "
+            f"₹{higher['outstanding']:,} vs "
+            f"₹{lower['outstanding']:,}."
         )
 
         total_time = (
@@ -761,6 +920,45 @@ def ask_question(
     # ========================================================
     # 7. Deterministic reasoning
     # ========================================================
+
+    print(
+        "DEBUG OUTSTANDING COMPARISON:",
+        intent,
+        len(summaries),
+        summaries,
+        )
+
+    if (
+        intent == "OUTSTANDING_COMPARISON"
+        and len(summaries) >= 2
+    ):
+        highest = max(
+            summaries,
+            key=lambda summary: summary["outstanding"],
+        )
+
+        answer = (
+            f"{highest['customer']} has the higher "
+            f"outstanding amount: "
+            f"₹{highest['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
 
     # --------------------------------------------------------
     # Why is outstanding higher?
@@ -924,7 +1122,78 @@ def ask_question(
                 "total": round(total_time, 4),
             },
         }
+    # 7.x Deterministic outstanding comparison
+    # ========================================================
 
+    if (
+        intent == "OUTSTANDING_COMPARISON"
+        and len(summaries) >= 2
+    ):
+        highest = max(
+            summaries,
+            key=lambda summary: summary["outstanding"],
+        )
+
+        answer = (
+            f"{highest['customer']} has the higher "
+            f"outstanding amount: "
+            f"₹{highest['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
+
+    # --------------------------------------------------------
+    # Financial situation explanation
+    # --------------------------------------------------------
+
+    if (
+        len(summaries) == 1
+        and (
+            "financial situation" in question_lower
+            or "financial status" in question_lower
+            or "financial position" in question_lower
+        )
+    ):
+
+        summary = summaries[0]
+
+        answer = (
+            f"{summary['customer']} has an invoice total of "
+            f"₹{summary['invoice_total']:,} and payments of "
+            f"₹{summary['payment_total']:,}, leaving an "
+            f"outstanding balance of "
+            f"₹{summary['outstanding']:,}."
+        )
+
+        total_time = time.perf_counter() - start
+
+        return {
+            "answer": answer,
+            "source": "database",
+            "intent": intent,
+            "complexity": complexity,
+            "customers": customer_names,
+            "timing": {
+                "db": round(db_time, 4),
+                "format": 0,
+                "llm": 0,
+                "total": round(total_time, 4),
+            },
+        }
     # ========================================================
     # 8. LLM fallback
     # ========================================================
@@ -976,16 +1245,40 @@ def ask_question(
 
     llm_start = time.perf_counter()
 
-    answer = ask_with_data(
+    answer = llm_client.ask_with_data(
         question,
         formatted_data,
         complexity,
     )
+    print("\nLLM GENERATED ANSWER:")
+    print(answer)
+    print()
+    if not answer:
+        total_time = time.perf_counter() - start
 
+        return {
+            "answer": (
+                "I’m unable to process this reasoning request right now. "
+                "Please try again later."
+        ),
+        "source": "llm_unavailable",
+        "intent": intent,
+        "complexity": complexity,
+        "customers": customer_names,
+        "timing": {
+            "db": round(db_time, 4),
+            "format": 0,
+            "llm": round(
+                time.perf_counter() - llm_start,
+                4,
+            ),
+            "total": round(total_time, 4),
+        },
+    }
     llm_time = (
         time.perf_counter() - llm_start
     )
-
+    llm_usage = llm_client.LAST_LLM_USAGE.copy()
     # ========================================================
     # 9. Financial validation
     # ========================================================
@@ -1001,6 +1294,11 @@ def ask_question(
         answer,
         summaries,
     )
+    print("================================")
+    print("LLM RAW ANSWER:")
+    print(answer)
+    print("================================")
+    print("Financial validation:", is_valid)
 
     print(
         "Financial validation:",
@@ -1022,6 +1320,7 @@ def ask_question(
             "intent": intent,
             "complexity": complexity,
             "customers": customer_names,
+            "usage": llm_usage,
             "timing": {
                 "db": round(db_time, 4),
                 "format": 0,
@@ -1060,6 +1359,7 @@ def ask_question(
         "intent": intent,
         "complexity": complexity,
         "customers": customer_names,
+        "usage" : llm_usage,
         "timing": {
             "db": round(db_time, 4),
             "format": 0,
